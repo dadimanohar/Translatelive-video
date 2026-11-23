@@ -1,10 +1,10 @@
-name: Build TeluguTutor Android APK
+name: Build and test TeluguTutor Android APK
 
 on:
   push:
     branches: [ main ]
     paths:
-      - '.payload/**'
+      - '.payload/beta3/**'
       - '.github/workflows/build-android.yml'
   workflow_dispatch:
 
@@ -12,11 +12,11 @@ permissions:
   contents: read
 
 jobs:
-  build-debug-apk:
+  build-and-emulator-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
-      - name: Check out repository
+      - name: Check out source
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -28,7 +28,6 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # The legacy `tools` SDK package was removed; install platform-tools only.
           packages: platform-tools
 
       - name: Install Android SDK packages
@@ -39,29 +38,60 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Restore Android project archive
+      - name: Restore exact Android source snapshot
         shell: bash
         run: |
           set -euo pipefail
-          cat .payload/part-*.b64 | base64 --decode > "$RUNNER_TEMP/telugututor-android.tar.gz"
-          mkdir -p "$RUNNER_TEMP/check"
+          cat .payload/beta3/part-*.b64 | base64 --decode > "$RUNNER_TEMP/telugututor-android.tar.gz"
           tar -tzf "$RUNNER_TEMP/telugututor-android.tar.gz" >/dev/null
           tar -xzf "$RUNNER_TEMP/telugututor-android.tar.gz" -C "$GITHUB_WORKSPACE"
           test -f TeluguTutor-Android/app/build.gradle.kts
-          test -f TeluguTutor-Android/app/src/main/AndroidManifest.xml
+          grep -q 'versionName = "1.2.0-beta3"' TeluguTutor-Android/app/build.gradle.kts
 
-      - name: Build Android debug APK
+      - name: Download and verify bundled Vosk English model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL_URL="https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+          MODEL_SHA256="30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"
+          mkdir -p TeluguTutor-Android/app/src/main/assets
+          curl --retry 3 --retry-delay 2 --fail --location "$MODEL_URL" -o "$RUNNER_TEMP/vosk-model-small-en-us-0.15.zip"
+          echo "$MODEL_SHA256  $RUNNER_TEMP/vosk-model-small-en-us-0.15.zip" | sha256sum --check
+          cp "$RUNNER_TEMP/vosk-model-small-en-us-0.15.zip" TeluguTutor-Android/app/src/main/assets/vosk-model-small-en-us-0.15.zip
+          test -s TeluguTutor-Android/app/src/main/assets/vosk-model-small-en-us-0.15.zip
+
+      - name: Build debug APK
         run: gradle --no-daemon -p TeluguTutor-Android assembleDebug --stacktrace
 
-      - name: Verify APK output
-        run: |
-          test -s TeluguTutor-Android/app/build/outputs/apk/debug/app-debug.apk
-          file TeluguTutor-Android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Run emulator integration tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: gradle --no-daemon -p TeluguTutor-Android connectedDebugAndroidTest --stacktrace
 
-      - name: Upload installable debug APK
+      - name: Verify APK contents and write checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="TeluguTutor-Android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          file "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libvosk.so'
+          unzip -l "$APK" | grep -q 'lib/x86_64/libvosk.so'
+          unzip -l "$APK" | grep -q 'assets/vosk-model-small-en-us-0.15.zip'
+          sha256sum "$APK" | tee "$APK.sha256"
+
+      - name: Upload installable APK and checksum
         uses: actions/upload-artifact@v4
         with:
-          name: TeluguTutor-Mobile-debug-APK
-          path: TeluguTutor-Android/app/build/outputs/apk/debug/app-debug.apk
+          name: TeluguTutor-Mobile-1.2.0-beta3-APK
+          path: |
+            TeluguTutor-Android/app/build/outputs/apk/debug/app-debug.apk
+            TeluguTutor-Android/app/build/outputs/apk/debug/app-debug.apk.sha256
           if-no-files-found: error
           retention-days: 14
